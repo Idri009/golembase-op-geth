@@ -8,6 +8,7 @@ import (
 
 	"github.com/andybalholm/brotli"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/golem-base/address"
@@ -166,7 +167,7 @@ type ArkivChangeOwner struct {
 	NewOwner  common.Address `json:"newOwner"`
 }
 
-func (tx *ArkivTransaction) Run(blockNumber uint64, txHash common.Hash, txIx int, sender common.Address, access storageutil.StateAccess) (_ []*types.Log, err error) {
+func (tx *ArkivTransaction) Run(blockNumber uint64, txHash common.Hash, txIx int, sender common.Address, access *storageaccounting.SlotUsageCounter, value *big.Int) (_ []*types.Log, err error) {
 
 	defer func() {
 		if err != nil {
@@ -181,12 +182,19 @@ func (tx *ArkivTransaction) Run(blockNumber uint64, txHash common.Hash, txIx int
 
 	logs := []*types.Log{}
 
-	storeEntity := func(key common.Hash, ap *entity.EntityMetaData, payload []byte, emitLogs bool) error {
+	requiredFee := uint256.NewInt(0)
 
-		err := entity.Store(access, key, sender, *ap, payload)
+	storeEntity := func(key common.Hash, ap *entity.EntityMetaData, btl uint64, payload []byte, emitLogs bool) (*uint256.Int, error) {
+
+		storedBytes, err := entity.Store(access, key, sender, *ap, payload)
 		if err != nil {
-			return fmt.Errorf("failed to store entity: %w", err)
+			return nil, fmt.Errorf("failed to store entity: %w", err)
 		}
+
+		cost := uint256.NewInt(0)
+		cost.Add(cost, uint256.NewInt(btl))
+		cost.Mul(cost, uint256.NewInt(storedBytes))
+		cost.Mul(cost, uint256.NewInt(100))
 
 		if emitLogs {
 			expiresAtBlockNumberBig := uint256.NewInt(ap.ExpiresAtBlock)
@@ -194,7 +202,8 @@ func (tx *ArkivTransaction) Run(blockNumber uint64, txHash common.Hash, txIx int
 			data := make([]byte, 64)
 			expiresAtBlockNumberBig.PutUint256(data[:32])
 
-			cost := uint256.NewInt(0)
+			requiredFee.Add(requiredFee, cost)
+
 			cost.PutUint256(data[32:])
 
 			// create the log for the created entity
@@ -220,7 +229,7 @@ func (tx *ArkivTransaction) Run(blockNumber uint64, txHash common.Hash, txIx int
 
 		}
 
-		return nil
+		return cost, nil
 
 	}
 
@@ -250,7 +259,7 @@ func (tx *ArkivTransaction) Run(blockNumber uint64, txHash common.Hash, txIx int
 			TransactionIndex:    uint64(txIx),
 		}
 
-		err := storeEntity(key, ap, create.Payload, true)
+		_, err := storeEntity(key, ap, create.BTL, create.Payload, true)
 
 		if err != nil {
 			return nil, err
@@ -337,8 +346,7 @@ func (tx *ArkivTransaction) Run(blockNumber uint64, txHash common.Hash, txIx int
 			TransactionIndex:    uint64(txIx),
 		}
 
-		err = storeEntity(update.EntityKey, ap, update.Payload, false)
-
+		cost, err := storeEntity(update.EntityKey, ap, update.BTL, update.Payload, false)
 		if err != nil {
 			return nil, err
 		}
@@ -350,7 +358,6 @@ func (tx *ArkivTransaction) Run(blockNumber uint64, txHash common.Hash, txIx int
 
 		expiresAtBlockNumberBig.PutUint256(data[32:64])
 
-		cost := uint256.NewInt(0)
 		cost.PutUint256(data[64:])
 
 		logs = append(
@@ -376,20 +383,25 @@ func (tx *ArkivTransaction) Run(blockNumber uint64, txHash common.Hash, txIx int
 	}
 
 	for _, extend := range tx.Extend {
-		oldExpiresAtBlock, owner, err := entity.ExtendBTL(access, extend.EntityKey, extend.NumberOfBlocks)
+		extendResult, err := entity.ExtendBTL(access, extend.EntityKey, extend.NumberOfBlocks)
 		if err != nil {
 			return nil, fmt.Errorf("failed to extend BTL of entity %s: %w", extend.EntityKey.Hex(), err)
 		}
 
-		newExpiresAtBlock := oldExpiresAtBlock + extend.NumberOfBlocks
+		newExpiresAtBlock := extendResult.OldExpiresAtBlock + extend.NumberOfBlocks
 
-		oldExpiresAtBlockBig := uint256.NewInt(oldExpiresAtBlock)
+		oldExpiresAtBlockBig := uint256.NewInt(extendResult.OldExpiresAtBlock)
 		newExpiresAtBlockBig := uint256.NewInt(newExpiresAtBlock)
+
+		cost := uint256.NewInt(extendResult.TotalBytes)
+		cost.Mul(cost, uint256.NewInt(extend.NumberOfBlocks))
+		cost.Mul(cost, uint256.NewInt(100))
+
+		requiredFee.Add(requiredFee, cost)
 
 		data := make([]byte, 96)
 		oldExpiresAtBlockBig.PutUint256(data[:32])
 		newExpiresAtBlockBig.PutUint256(data[32:64])
-		cost := uint256.NewInt(0)
 		cost.PutUint256(data[64:])
 
 		logs = append(
@@ -405,7 +417,7 @@ func (tx *ArkivTransaction) Run(blockNumber uint64, txHash common.Hash, txIx int
 				Topics: []common.Hash{
 					arkivlogs.ArkivEntityBTLExtended,
 					extend.EntityKey,
-					addressToHash(owner),
+					addressToHash(extendResult.Owner),
 				},
 				Data:        data,
 				BlockNumber: blockNumber,
@@ -426,7 +438,7 @@ func (tx *ArkivTransaction) Run(blockNumber uint64, txHash common.Hash, txIx int
 		oldOwner := md.Owner
 
 		md.Owner = changeOwner.NewOwner
-		err = entity.StoreEntityMetaData(access, changeOwner.EntityKey, *md)
+		_, err = entity.StoreEntityMetaData(access, changeOwner.EntityKey, *md)
 		if err != nil {
 			return nil, fmt.Errorf("failed to store entity meta data for change owner %s: %w", changeOwner.EntityKey.Hex(), err)
 		}
@@ -445,6 +457,17 @@ func (tx *ArkivTransaction) Run(blockNumber uint64, txHash common.Hash, txIx int
 				BlockNumber: blockNumber,
 			},
 		)
+	}
+
+	intValue, _ := uint256.FromBig(value)
+
+	if requiredFee.Cmp(intValue) > 0 {
+		return nil, fmt.Errorf("required fee %s is greater than value %s", requiredFee.String(), value.String())
+	}
+
+	delta := intValue.Sub(intValue, requiredFee)
+	if delta.Sign() > 0 {
+		access.AddBalance(sender, delta, tracing.BalanceTransactionFeeRefund)
 	}
 
 	return logs, nil
@@ -470,7 +493,15 @@ func UnpackArkivTransaction(compressed []byte) (*ArkivTransaction, error) {
 	return tx, nil
 }
 
-func ExecuteArkivTransaction(compressed []byte, blockNumber uint64, txHash common.Hash, txIx int, sender common.Address, access storageutil.StateAccess) ([]*types.Log, error) {
+func ExecuteArkivTransaction(
+	compressed []byte,
+	blockNumber uint64,
+	txHash common.Hash,
+	txIx int,
+	sender common.Address,
+	access storageutil.StateAccess,
+	value *big.Int,
+) ([]*types.Log, error) {
 
 	tx, err := UnpackArkivTransaction(compressed)
 	if err != nil {
@@ -479,7 +510,7 @@ func ExecuteArkivTransaction(compressed []byte, blockNumber uint64, txHash commo
 
 	st := storageaccounting.NewSlotUsageCounter(access)
 
-	logs, err := tx.Run(blockNumber, txHash, txIx, sender, st)
+	logs, err := tx.Run(blockNumber, txHash, txIx, sender, st, value)
 	if err != nil {
 		log.Error("Failed to run storage transaction", "error", err)
 		return nil, fmt.Errorf("failed to run storage transaction: %w", err)
