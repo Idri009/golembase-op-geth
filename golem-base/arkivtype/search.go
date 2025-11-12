@@ -6,6 +6,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/golem-base/storageutil/entity"
 )
 
 var KeyAttributeKey = "$key"
@@ -76,7 +77,7 @@ type OrderByAnnotation struct {
 
 type QueryResponse struct {
 	Data        []json.RawMessage `json:"data"`
-	BlockNumber hexutil.Uint64    `json:"blockNumber"`
+	BlockNumber uint64            `json:"blockNumber"`
 	Cursor      *string           `json:"cursor,omitempty"`
 }
 
@@ -95,23 +96,13 @@ type EntityData struct {
 	Key                         *common.Hash    `json:"key,omitempty"`
 	Value                       hexutil.Bytes   `json:"value,omitempty"`
 	ContentType                 *string         `json:"contentType,omitempty"`
-	ExpiresAt                   *hexutil.Uint64 `json:"expiresAt,omitempty"`
+	ExpiresAt                   *uint64         `json:"expiresAt,omitempty"`
 	Owner                       *common.Address `json:"owner,omitempty"`
-	CreatedAtBlock              *hexutil.Uint64 `json:"createdAtBlock,omitempty"`
-	LastModifiedAtBlock         *hexutil.Uint64 `json:"lastModifiedAtBlock,omitempty"`
-	TransactionIndexInBlock     *hexutil.Uint64 `json:"transactionIndexInBlock,omitempty"`
-	OperationIndexInTransaction *hexutil.Uint64 `json:"operationIndexInTransaction,omitempty"`
+	CreatedAtBlock              *uint64         `json:"createdAtBlock,omitempty"`
+	LastModifiedAtBlock         *uint64         `json:"lastModifiedAtBlock,omitempty"`
+	TransactionIndexInBlock     *uint64         `json:"transactionIndexInBlock,omitempty"`
+	OperationIndexInTransaction *uint64         `json:"operationIndexInTransaction,omitempty"`
 
-	StringAttributes  []StringAnnotation  `json:"stringAttributes,omitempty"`
-	NumericAttributes []NumericAnnotation `json:"numericAttributes,omitempty"`
-}
-
-type StringAnnotation struct {
-	Key   string `json:"key"`
-	Value string `json:"value"`
-}
-
-type NumericAnnotation struct {
-	Key   string         `json:"key"`
-	Value hexutil.Uint64 `json:"value"`
+	StringAttributes  []entity.StringAnnotation  `json:"stringAttributes,omitempty"`
+	NumericAttributes []entity.NumericAnnotation `json:"numericAttributes,omitempty"`
 }

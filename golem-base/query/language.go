@@ -5,13 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
-	"reflect"
 	"slices"
 	"strings"
 
 	"github.com/alecthomas/participle/v2"
 	"github.com/alecthomas/participle/v2/lexer"
-	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/log"
 
 	"github.com/ethereum/go-ethereum/golem-base/arkivtype"
@@ -33,11 +31,8 @@ type QueryOptions struct {
 
 type OrderBy struct {
 	Name       string
-	Type       string
 	Descending bool
 }
-
-var cursorTypes []string = []string{"string", "numeric"}
 
 func (opts *QueryOptions) GetColumnIndex(column string) (int, error) {
 	ix, found := slices.BinarySearch(opts.AllColumns(), column)
@@ -49,63 +44,21 @@ func (opts *QueryOptions) GetColumnIndex(column string) (int, error) {
 }
 
 func (opts *QueryOptions) EncodeCursor(cursor *arkivtype.Cursor) (string, error) {
-	encodedCursor := make([]any, 0, len(cursor.ColumnValues)*4+1)
+	encodedCursor := make([]any, 0, len(cursor.ColumnValues)*3+1)
 
-	encodedCursor = append(encodedCursor, hexutil.EncodeUint64(cursor.BlockNumber))
+	encodedCursor = append(encodedCursor, cursor.BlockNumber)
 
 	for _, c := range cursor.ColumnValues {
-		log.Info("encoding cursor value", "name", c.ColumnName, "value", c.Value)
 		columnIx, err := opts.GetColumnIndex(c.ColumnName)
 		if err != nil {
 			return "", err
 		}
-		descending := uint32(0)
+		descending := uint64(0)
 		if c.Descending {
 			descending = 1
 		}
-
-		var (
-			// Either a literal string value, or a hex encoded integer value
-			value any
-			// Index in the cursorTypes array
-			typ int
-		)
-		// We need to figure out which type we got from the column
-		switch anyVal := c.Value.(type) {
-		// Values that were passed as a *any to the Scan method
-		case *any:
-			// We dereference to get the actual any value and then check which type
-			// is inside. We don't explicitly dereference the pointer inside the any value
-			switch anyVal := (*anyVal).(type) {
-			case string:
-				typ = slices.Index(cursorTypes, "string")
-				value = anyVal
-			case int64:
-				typ = slices.Index(cursorTypes, "numeric")
-				value = hexutil.Uint64(anyVal)
-			default:
-				return "", fmt.Errorf(
-					"unexpected type for cursor value of column %s: %s",
-					c.ColumnName, reflect.TypeOf(anyVal),
-				)
-			}
-		// Other values that were passed to the Scan method as a double pointer to
-		// a concrete type (the inner pointer if for SQL NULL values).
-		case **string:
-			typ = slices.Index(cursorTypes, "string")
-			value = **anyVal
-		case **uint64:
-			typ = slices.Index(cursorTypes, "numeric")
-			value = hexutil.Uint64(**anyVal)
-		default:
-			return "", fmt.Errorf(
-				"unexpected type for cursor value of column %s: %s",
-				c.ColumnName, reflect.TypeOf(anyVal),
-			)
-		}
-
 		encodedCursor = append(encodedCursor,
-			columnIx, typ, value, descending,
+			uint64(columnIx), c.Value, descending,
 		)
 	}
 
@@ -139,20 +92,17 @@ func (opts *QueryOptions) DecodeCursor(cursorStr string) (*arkivtype.Cursor, err
 		return nil, fmt.Errorf("could not unmarshal cursor: %w (%s)", err, string(bs))
 	}
 
-	firstValue, ok := encoded[0].(string)
+	firstValue, ok := encoded[0].(float64)
 	if !ok {
 		return nil, fmt.Errorf("invalid block number: %d", encoded[0])
 	}
-	blockNumber, err := hexutil.DecodeUint64(firstValue)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decode block number: %w", err)
-	}
+	blockNumber := uint64(firstValue)
 	cursor.BlockNumber = blockNumber
 
-	cursor.ColumnValues = make([]arkivtype.CursorValue, 0, (len(encoded)-1)/4)
+	cursor.ColumnValues = make([]arkivtype.CursorValue, 0, len(encoded)-1)
 
-	for c := range slices.Chunk(encoded[1:], 4) {
-		if len(c) != 4 {
+	for c := range slices.Chunk(encoded[1:], 3) {
+		if len(c) != 3 {
 			return nil, fmt.Errorf("invalid length of cursor array: %d", len(c))
 		}
 
@@ -160,11 +110,7 @@ func (opts *QueryOptions) DecodeCursor(cursorStr string) (*arkivtype.Cursor, err
 		if !ok {
 			return nil, fmt.Errorf("unknown column index: %d", c[0])
 		}
-		secondValue, ok := c[1].(float64)
-		if !ok {
-			return nil, fmt.Errorf("unknown type index: %d", c[1])
-		}
-		fourthValue, ok := c[3].(float64)
+		thirdValue, ok := c[2].(float64)
 		if !ok {
 			return nil, fmt.Errorf("unknown value for descending: %d", c[3])
 		}
@@ -174,32 +120,7 @@ func (opts *QueryOptions) DecodeCursor(cursorStr string) (*arkivtype.Cursor, err
 			return nil, fmt.Errorf("unknown column index: %d", columnIx)
 		}
 
-		typeIx := int(secondValue)
-		if typeIx >= len(cursorTypes) {
-			return nil, fmt.Errorf("unknown type index: %d", columnIx)
-		}
-
-		strValue, ok := c[2].(string)
-		if !ok {
-			return nil, fmt.Errorf("unexpected value in cursor")
-		}
-
-		var value any
-		switch cursorTypes[typeIx] {
-		case "string":
-			value = strValue
-		case "numeric":
-			val, err := hexutil.DecodeUint64(strValue)
-			if err != nil {
-				return nil, fmt.Errorf("could not decode number from cursor: %w", err)
-			}
-			value = val
-		default:
-			return nil, fmt.Errorf("unsupported type in cursor")
-
-		}
-
-		descendingInt := int(fourthValue)
+		descendingInt := int(thirdValue)
 		descending := false
 		switch descendingInt {
 		case 0:
@@ -212,7 +133,7 @@ func (opts *QueryOptions) DecodeCursor(cursorStr string) (*arkivtype.Cursor, err
 
 		cursor.ColumnValues = append(cursor.ColumnValues, arkivtype.CursorValue{
 			ColumnName: opts.AllColumns()[columnIx],
-			Value:      value,
+			Value:      c[1],
 			Descending: descending,
 		})
 	}
@@ -256,7 +177,6 @@ func (opts *QueryOptions) annotationSortingColumns() []OrderBy {
 	for i, o := range opts.OrderBy {
 		columns = append(columns, OrderBy{
 			Name:       fmt.Sprintf("arkiv_annotation_sorting%d.value", i),
-			Type:       o.Type,
 			Descending: o.Descending,
 		})
 	}
@@ -267,18 +187,9 @@ func (opts *QueryOptions) OrderByColumns() []OrderBy {
 	if opts.orderByColumns == nil {
 		opts.orderByColumns = append(
 			opts.annotationSortingColumns(),
-			OrderBy{
-				Name: arkivtype.GetColumnOrPanic("last_modified_at_block"),
-				Type: "numeric",
-			},
-			OrderBy{
-				Name: arkivtype.GetColumnOrPanic("transaction_index_in_block"),
-				Type: "numeric",
-			},
-			OrderBy{
-				Name: arkivtype.GetColumnOrPanic("operation_index_in_transaction"),
-				Type: "numeric",
-			},
+			OrderBy{Name: arkivtype.GetColumnOrPanic("last_modified_at_block")},
+			OrderBy{Name: arkivtype.GetColumnOrPanic("transaction_index_in_block")},
+			OrderBy{Name: arkivtype.GetColumnOrPanic("operation_index_in_transaction")},
 		)
 	}
 	return opts.orderByColumns
