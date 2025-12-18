@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"math/big"
 	"os"
 	"os/exec"
@@ -37,7 +38,7 @@ var opts = godog.Options{
 	Output:      colors.Uncolored(os.Stdout),
 	Format:      "progress",
 	Strict:      true,
-	Concurrency: runtime.NumCPU(),
+	Concurrency: int(math.Max(float64(runtime.NumCPU()/2), 1)),
 
 	Paths: []string{"features"},
 }
@@ -53,7 +54,7 @@ func init() {
 }
 
 func compileGeth() (string, func(), error) {
-	td, err := os.MkdirTemp("", "golem-base")
+	td, err := os.MkdirTemp("", "arkiv-cucumber-compiled-geth-")
 	if err != nil {
 		panic(fmt.Errorf("failed to create temp dir: %w", err))
 	}

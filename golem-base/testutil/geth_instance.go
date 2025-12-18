@@ -32,7 +32,6 @@ type GethInstance struct {
 	ETHClient   *ethclient.Client
 	RPCClient   *rpc.Client
 	RPCEndpoint string
-	WALDir      string
 }
 
 type gethProcess struct {
@@ -45,13 +44,6 @@ type gethProcess struct {
 func startGethInstance(ctx context.Context, gethPath string, tempDir string) (_ *GethInstance, err error) {
 	// Start geth in dev mode
 
-	td, err := os.MkdirTemp("", "geth-dev-wal")
-	if err != nil {
-		return nil, fmt.Errorf("failed to create temp dir: %w", err)
-	}
-
-	walDir := filepath.Join(td, "geth-dev-wal")
-
 	geth, err := startGethWithPath(
 		ctx,
 		gethPath,
@@ -60,9 +52,9 @@ func startGethInstance(ctx context.Context, gethPath string, tempDir string) (_ 
 		"--http",           // Enable the HTTP-RPC server
 		"--ipcdisable",     // Disable ipc, to avoid concurrency issues (using the same socket path)
 		"--http.port", "0", // Use random port
-		"--http.api", "eth,web3,net,debug,arkiv,golembase", // Enable necessary APIs
+		"--http.api", "eth,web3,net,debug,arkiv", // Enable necessary APIs
 		"--verbosity", "3", // Increase logging to see HTTP endpoint
-		"--golembase.sqlstatefile", filepath.Join(tempDir, "golem-base.db"),
+		"--golembase.sqlstatefile", filepath.Join(tempDir, "arkiv.db"),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to start geth: %w", err)
@@ -78,7 +70,7 @@ func startGethInstance(ctx context.Context, gethPath string, tempDir string) (_ 
 			if we != nil {
 				err = errors.Join(err, we)
 			}
-			os.RemoveAll(td)
+			os.RemoveAll(tempDir)
 		}
 	}()
 
@@ -110,6 +102,7 @@ func startGethInstance(ctx context.Context, gethPath string, tempDir string) (_ 
 		client.Close()
 		rpcClient.Close()
 		geth.Process.Kill()
+		os.RemoveAll(tempDir)
 	}
 
 	gi := &GethInstance{
@@ -118,7 +111,6 @@ func startGethInstance(ctx context.Context, gethPath string, tempDir string) (_ 
 		RPCClient:   rpcClient,
 		RPCEndpoint: endpoint,
 		shutdown:    cleanup,
-		WALDir:      walDir,
 	}
 
 	return gi, nil
